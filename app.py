@@ -1,24 +1,28 @@
 import streamlit as st
 from pathlib import Path
-import time
 import asyncio
 
 # -------------------------------------------------
-# 1️⃣ Page config & global style
+# 1️⃣ Page config
 # -------------------------------------------------
 st.set_page_config(
-    page_title="My Streamlit Prototype",
+    page_title="LLM Chat Prototype",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # -------------------------------------------------
-# 2️⃣ Caching heavy resources (model, API client)
+# 2️⃣ Cache heavy resources (model, tokenizer)
 # -------------------------------------------------
-@st.experimental_singleton
+@st.cache_resource(show_spinner="Loading model…")
 def load_model():
-    # Example: load a huggingface model once per session
+    """
+    Load the model *once* per session (or per process, depending on the
+    deployment).  Using `cache_resource` tells Streamlit that the returned
+    object is a heavyweight resource that should be kept alive.
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     model = AutoModelForCausalLM.from_pretrained("gpt2")
     return tokenizer, model
@@ -26,52 +30,67 @@ def load_model():
 tokenizer, model = load_model()
 
 # -------------------------------------------------
-# 3️⃣ Session state helpers
+# 3️⃣ Session‑state helpers (chat history)
 # -------------------------------------------------
 if "messages" not in st.session_state:
-    st.session_state["messages"] = []   # chat history
+    st.session_state["messages"] = []   # list of dicts: {"role": "...", "content": "…"}
 
 # -------------------------------------------------
-# 4️⃣ UI layout
+# 4️⃣ Sidebar controls
 # -------------------------------------------------
-st.sidebar.title("⚙️ Controls")
-temp = st.sidebar.slider("Temperature", 0.0, 1.0, 0.7)
-max_len = st.sidebar.number_input("Max tokens", 10, 200, 50)
+st.sidebar.title("⚙️ Settings")
+temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.7, step=0.05)
+max_new_tokens = st.sidebar.number_input("Max new tokens", 10, 200, 50)
 
+# -------------------------------------------------
+# 5️⃣ Main UI
+# -------------------------------------------------
 st.title("🗨️ Simple LLM Chat Demo")
-user_input = st.chat_input("Ask me anything…")
+user_prompt = st.chat_input("Ask me anything…")
 
 # -------------------------------------------------
-# 5️⃣ Chat handling with streaming output
+# 6️⃣ Streaming generation (async loop)
 # -------------------------------------------------
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
+if user_prompt:
+    # Store user message
+    st.session_state.messages.append({"role": "user", "content": user_prompt})
+
+    # Show assistant placeholder while we generate
     with st.chat_message("assistant"):
         placeholder = st.empty()
-        # Run generation in a background thread to keep UI responsive
+
         async def generate():
-            input_ids = tokenizer(user_input, return_tensors="pt").input_ids
-            output = model.generate(
+            # Encode input
+            input_ids = tokenizer(user_prompt, return_tensors="pt").input_ids
+
+            # Generate tokens (no need for async here, but we stream manually)
+            output_ids = model.generate(
                 input_ids,
-                max_length=len(input_ids[0]) + max_len,
-                temperature=temp,
+                max_length=input_ids.shape[1] + max_new_tokens,
+                temperature=temperature,
                 do_sample=True,
-                eos_token_id=tokenizer.eos_token_id,
                 pad_token_id=tokenizer.eos_token_id,
-                output_scores=False,
-                return_dict_in_generate=False,
+                eos_token_id=tokenizer.eos_token_id,
             )
-            text = tokenizer.decode(output[0], skip_special_tokens=True)
-            # Simple streaming simulation
-            for i in range(0, len(text), 20):
-                placeholder.markdown(text[: i + 20] + "▍")
-                await asyncio.sleep(0.05)
-            placeholder.markdown(text)
+            full_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+            # Simulate streaming by revealing chunks
+            for i in range(0, len(full_text), 20):
+                chunk = full_text[: i + 20]
+                placeholder.markdown(chunk + "▍")
+                await asyncio.sleep(0.03)   # tweak for smoother feel
+            placeholder.markdown(full_text)   # final clean output
+
+        # Run the async generator
         asyncio.run(generate())
-    st.session_state.messages.append({"role": "assistant", "content": placeholder.markdown})
+
+    # Store assistant reply
+    st.session_state.messages.append(
+        {"role": "assistant", "content": placeholder.markdown}
+    )
 
 # -------------------------------------------------
-# 6️⃣ Render full conversation
+# 7️⃣ Render the full conversation
 # -------------------------------------------------
 for msg in st.session_state.messages:
     if msg["role"] == "user":
